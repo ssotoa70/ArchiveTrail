@@ -2,7 +2,7 @@
 
 ## Overview
 
-ArchiveTrail is a VAST Data Platform-native solution for automated cold data tiering from local VAST S3/NFS/SMB views to remote AWS S3 buckets, with complete genealogy tracking and audit traceability.
+ArchiveTrail is a VAST Data Platform-native solution for automated cold data tiering from local VAST S3/NFS/SMB views to remote AWS S3 buckets, with complete genealogy tracking and audit traceability. **Requires VAST Data Platform 5.4 or above.**
 
 **Core problem:** Move data that hasn't been accessed in N days (user-configurable) from local VAST storage to AWS S3, while maintaining a full chain-of-custody record — where it came from, when it was created, when and why it was moved, where it lives now, and proof of data integrity throughout.
 
@@ -49,7 +49,7 @@ NFS / SMB / S3 clients ──► VAST Element Store
 
 1. **Element Handle as the immutable identity** — VAST assigns every element a unique handle that survives renames and moves. This is the genealogy anchor, not the file path.
 2. **Every state transition is recorded** — no silent deletes, no overwrites without a log entry.
-3. **Audit trail is queryable** — all lineage data lives in VAST DB tables accessible via Trino/SQL.
+3. **Audit trail is queryable** — all lineage data lives in VAST DB tables accessible via SQL (VAST DB is built into the platform; no separate database required).
 4. **VAST Protocol Auditing as independent witness** — a second, platform-level source of truth that corroborates application-level tracking.
 5. **Catalog snapshots add the dimension of time** — query what the namespace looked like at any point in time.
 6. **Config snapshot embedded in every event** — answer "what threshold was active when file X was offloaded?"
@@ -787,5 +787,5 @@ Each arrow produces one or more rows in `lifecycle_events` with full context.
 - **Cost tracking**: Add AWS storage cost estimates to `asset_registry` based on size and storage class
 - **Retention policies**: Auto-delete from AWS after N years, with full lifecycle event
 - **Multi-destination**: Support multiple AWS buckets/regions, or Azure Blob, with destination tracking per copy
-- **Dashboard**: Trino + Apache Superset visualization of offload activity, cost savings, and genealogy queries
+- **Dashboard**: VAST DB + Apache Superset visualization of offload activity, cost savings, and genealogy queries
 - **Alerting**: DataEngine function that queries for `COPY_FAILED` or `CHECKSUM_MISMATCH` events and sends notifications

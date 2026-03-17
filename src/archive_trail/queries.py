@@ -1,7 +1,8 @@
 """Pre-built genealogy and traceability queries for ArchiveTrail.
 
-These queries can be run directly via Trino or through the VAST Query Engine.
-They are also used by the CLI for genealogy reporting.
+These queries run against VAST DB (the built-in database in the VAST Data Platform).
+They can be executed via the vastdb Python SDK, the VAST DB query editor,
+or any Trino-compatible SQL client. Also used by the CLI for genealogy reporting.
 """
 
 SCHEMA = "archive/lineage"

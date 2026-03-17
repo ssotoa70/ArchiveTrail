@@ -41,12 +41,13 @@ docker-push: ## Push container to registry (set REGISTRY env var)
 # -- Database --
 
 sql-init: ## Display SQL init instructions
-	@echo "Run the following SQL files in order against your VAST DB (via Trino):"
+	@echo "Run the following SQL files in order against VAST DB:"
 	@echo "  1. sql/001_create_schema.sql"
 	@echo "  2. sql/002_create_tables.sql"
 	@echo "  3. sql/003_seed_config.sql"
 	@echo ""
-	@echo "Example:"
+	@echo "Use the VAST DB query editor in the management UI, or any Trino-compatible client."
+	@echo "Example (using trino CLI):"
 	@echo "  trino --catalog vast --execute \"\$$(cat sql/001_create_schema.sql)\""
 
 # -- CLI shortcuts --

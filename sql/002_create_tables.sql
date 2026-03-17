@@ -1,6 +1,6 @@
 -- ArchiveTrail: Table Creation
 -- Run after 001_create_schema.sql
--- Execute via Trino connected to VAST Database.
+-- Execute via VAST DB query editor or any Trino-compatible SQL client.
 
 -- Table 1: User-configurable parameters
 CREATE TABLE IF NOT EXISTS vast."archive/lineage".offload_config (

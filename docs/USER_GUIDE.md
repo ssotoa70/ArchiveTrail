@@ -74,7 +74,7 @@ ArchiveTrail records every action in three places simultaneously (see diagram in
 Before you start deploying ArchiveTrail, verify you have everything you need:
 
 **Infrastructure:**
-- [ ] VAST Data Platform cluster (v4.0 or newer) with direct S3 access
+- [ ] VAST Data Platform cluster (v5.4 or newer) with direct S3 access
 - [ ] AWS account with S3 bucket (or ability to create one)
 - [ ] AWS credentials with S3 permission (GetObject, PutObject, DeleteObject, PutObjectTagging)
 - [ ] Kubernetes cluster (for running the DataEngine functions)
@@ -82,14 +82,14 @@ Before you start deploying ArchiveTrail, verify you have everything you need:
 
 **VAST Configuration:**
 - [ ] Direct S3 endpoint to your VAST cluster (typically something like `https://vip-pool.vast.local`)
-- [ ] Access credentials to VAST database (Trino access)
+- [ ] Access credentials to VAST DB (S3 access key and secret key for your VAST cluster)
 - [ ] One or more views configured with **multiple protocols enabled** (must have both NFS or SMB **plus S3**—files need to be readable via S3)
 - [ ] At least 7 days of free disk space for VAST Catalog snapshots
 
 **Knowledge & Access:**
 - [ ] You can log into VAST management UI (web browser)
 - [ ] You have admin access to VAST Settings
-- [ ] You can run SQL commands against VAST database (via Trino or similar)
+- [ ] You can run SQL commands against VAST DB (via the VAST DB query editor in the management UI, the `vastdb` Python SDK, or any Trino-compatible SQL client)
 - [ ] You have Docker installed locally or access to a container registry
 - [ ] You have permissions to create Kubernetes resources (Deployments, ConfigMaps, etc.)
 
@@ -179,14 +179,18 @@ The ArchiveTrail project includes three SQL files in the `sql/` directory:
 
 #### Step 2.2: Access the VAST Database
 
-You need a SQL client connected to your VAST database. VAST uses Trino as the SQL interface. Your IT team may provide a Trino CLI client, or you can use a web-based Trino interface if available.
+You need a SQL client connected to your VAST DB. VAST DB is the built-in database included with every VAST Data Platform cluster (5.4+)—there is no separate database to install. You can run SQL against it using any of these methods:
 
-**Example command** (if you have Trino CLI installed):
+- **VAST management UI:** Navigate to **Data > Query Editor** in the web UI (easiest for one-off queries)
+- **`vastdb` Python SDK:** Used by ArchiveTrail internally—also works for ad-hoc queries
+- **Any Trino-compatible SQL client:** VAST DB speaks the Trino wire protocol, so tools like DBeaver, DataGrip, or the `trino` CLI work out of the box
+
+**Example using the Trino CLI** (optional—any of the above methods work):
 ```
 trino --server https://vms.vast.local --user admin --password
 ```
 
-> **What this means:** You're connecting to the VAST Metadata Service (VMS) which stores all metadata about your files. Trino is a SQL query engine that lets you read and write to this database.
+> **What this means:** You're connecting to the VAST Metadata Service (VMS) which hosts VAST DB. VAST DB is a native SQL database built into the VAST Data Platform that stores metadata, tracking tables, and audit data. No separate Trino deployment is needed—VAST DB is included with your cluster.
 
 #### Step 2.3: Run the SQL Scripts in Order
 
@@ -194,7 +198,7 @@ trino --server https://vms.vast.local --user admin --password
 
 **For script 001 (create schema):**
 
-Open the file `ArchiveTrail/sql/001_create_schema.sql` in a text editor. Copy the entire contents. In your Trino client or SQL editor, paste and run the contents. You should see a message indicating the schema was created.
+Open the file `ArchiveTrail/sql/001_create_schema.sql` in a text editor. Copy the entire contents. In the VAST DB query editor (or your preferred SQL client), paste and run the contents. You should see a message indicating the schema was created.
 
 **For script 002 (create tables):**
 
@@ -208,7 +212,7 @@ Repeat with `sql/003_seed_config.sql`. This loads the default configuration valu
 
 After running all three scripts, verify everything worked:
 
-In your Trino client, run:
+In your SQL client, run:
 ```sql
 SELECT table_name FROM information_schema.tables
 WHERE table_schema = 'archive/lineage';
@@ -226,7 +230,7 @@ You should see four tables listed:
 
 The seed script (`003_seed_config.sql`) loaded default values. If you need different settings right now, you can update them before going live.
 
-In Trino, run:
+In VAST DB, run:
 ```sql
 SELECT config_key, config_value FROM vast."archive/lineage".offload_config
 ORDER BY config_key;
@@ -404,7 +408,7 @@ Before you let ArchiveTrail delete any files, it's critical to test it in "dry r
 
 #### Step 5.1: Ensure dry_run is Enabled
 
-In Trino, verify:
+In VAST DB, verify:
 
 ```sql
 SELECT config_value FROM vast."archive/lineage".offload_config
@@ -435,7 +439,7 @@ The pipeline should complete in a few minutes to a few hours (depending on how m
 
 #### Step 5.4: Check the Lifecycle Events
 
-In Trino, query the events to see what happened:
+In VAST DB, query the events to see what happened:
 
 ```sql
 SELECT event_type, COUNT(*) as cnt
@@ -461,7 +465,7 @@ SCANNED               1250
 
 To verify the discovery really scanned the Catalog, query the VAST audit log:
 
-In Trino:
+In VAST DB:
 ```sql
 SELECT COUNT(*) FROM vast."audit/schema".audit_table
 WHERE timestamp > now() - INTERVAL '1' HOUR
@@ -481,7 +485,7 @@ Once you've verified the dry run, it's time to enable actual copying and deletio
 
 #### Step 6.1: Switch from dry_run to Live Mode
 
-In Trino:
+In VAST DB:
 
 ```sql
 UPDATE vast."archive/lineage".offload_config
@@ -515,7 +519,7 @@ Wait for the next scheduled pipeline run (2 AM) or trigger it manually. This tim
 3. Verify checksums
 4. (If auto_delete_local = true) Delete local copies
 
-Monitor in the DataEngine logs and in Trino:
+Monitor in the DataEngine logs and in VAST DB:
 
 ```sql
 SELECT event_type, COUNT(*) as cnt, MAX(event_timestamp) as latest
@@ -573,7 +577,7 @@ After the pipeline runs, see how many files were processed:
 - Navigate to **Pipelines > archive-trail-tiering > Runs**
 - Review the latest run's status and logs
 
-**Via SQL (in Trino):**
+**Via SQL (in VAST DB):**
 ```sql
 -- How many assets are in each location?
 SELECT current_location, COUNT(*) as count,
@@ -611,7 +615,7 @@ handle=0x1A2B3C4D  location=LOCAL_DELETED  original=/tenant/projects/report_2024
   md5=a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6
 ```
 
-**Via SQL (in Trino):**
+**Via SQL (in VAST DB):**
 ```sql
 SELECT element_handle, original_path, current_location,
        current_aws_bucket, current_aws_key, last_state_change
@@ -645,7 +649,7 @@ Lifecycle for element 0x1A2B3C4D:
 
 This shows every action in chronological order with timestamps, success/failure, and any details.
 
-**Via SQL (in Trino):**
+**Via SQL (in VAST DB):**
 ```sql
 SELECT event_timestamp, event_type, source_path, destination_path,
        success, error_message, checksum_value
@@ -658,7 +662,7 @@ ORDER BY event_timestamp ASC;
 
 You can change when files are considered "old" anytime. The change is automatically logged.
 
-**Via SQL (in Trino):**
+**Via SQL (in VAST DB):**
 
 To change from 60 days to 90 days:
 
@@ -714,7 +718,7 @@ This shows you:
 - Overall success rates (28,500 completed out of 28,500 started = 100%)
 - Any failures to investigate
 
-**Via SQL (in Trino):**
+**Via SQL (in VAST DB):**
 
 ```sql
 -- Storage summary
@@ -759,7 +763,7 @@ Output:
 }
 ```
 
-**Via SQL (in Trino):**
+**Via SQL (in VAST DB):**
 ```sql
 SELECT config_key, config_value, updated_by, updated_at, change_reason
 FROM vast."archive/lineage".offload_config
@@ -783,7 +787,7 @@ Config change history:
   [2026-03-17 02:00:00]  dry_run: 'true' -> 'false'  by admin (Go live)
 ```
 
-**Via SQL (in Trino):**
+**Via SQL (in VAST DB):**
 ```sql
 SELECT config_key, old_value, new_value, changed_by, changed_at, change_reason
 FROM vast."archive/lineage".config_change_log
@@ -941,7 +945,7 @@ This table explains every configuration setting you can adjust.
 
 ### Cannot Connect to VAST Database
 
-**Symptom:** Error like "Connection refused" or "Trino error" when running SQL scripts.
+**Symptom:** Error like "Connection refused" or "Connection error" when running SQL scripts.
 
 **Solution:**
 
@@ -959,7 +963,7 @@ This table explains every configuration setting you can adjust.
 
 3. Check credentials in `.env`: `VASTDB_ACCESS_KEY` and `VASTDB_SECRET_KEY` must be correct.
 
-4. Verify Trino CLI is installed and can connect manually:
+4. Verify you can connect to VAST DB manually (using any Trino-compatible client, e.g., the `trino` CLI):
    ```bash
    trino --server https://vms.vast.local --user <key> --password <secret>
    ```
