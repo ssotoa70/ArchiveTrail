@@ -3,20 +3,22 @@
 Every state transition produces an append-only row in the lifecycle_events
 table. This module provides the single entry point for emitting events
 with full context and traceability.
+
+Uses the vastdb PyArrow-based SDK for inserts.
 """
 
-import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
 
-import vastdb
+import pyarrow as pa
 
-logger = logging.getLogger("archive_trail.events")
-
-SCHEMA = "archive/lineage"
-EVENTS_TABLE = "lifecycle_events"
+from archive_trail.db import (
+    LIFECYCLE_EVENTS_SCHEMA,
+    TABLE_LIFECYCLE_EVENTS,
+    get_table,
+)
 
 
 class EventType:
@@ -77,48 +79,51 @@ class LifecycleEvent:
 
 
 class EventEmitter:
-    """Emits lifecycle events to the VAST DB lifecycle_events table."""
+    """Emits lifecycle events to the VAST DB lifecycle_events table.
 
-    def __init__(self, session: vastdb.Session):
+    Uses vastdb session with PyArrow table inserts.
+    """
+
+    def __init__(self, session, logger=None):
         self._session = session
+        self._logger = logger
+
+    def _log(self, level, msg, *args):
+        if self._logger:
+            getattr(self._logger, level)(msg, *args)
 
     def emit(self, event: LifecycleEvent) -> str:
         """Write a lifecycle event to the database. Returns the event_id."""
-        self._session.execute(
-            f"""
-            INSERT INTO vast."{SCHEMA}".{EVENTS_TABLE}
-                (event_id, element_handle, registration_id,
-                 event_type, event_timestamp,
-                 source_path, destination_path, aws_bucket, aws_key,
-                 file_size_bytes, file_atime, file_mtime,
-                 pipeline_run_id, function_name, triggered_by,
-                 success, error_message, checksum_value,
-                 config_snapshot)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                event.event_id,
-                event.element_handle,
-                event.registration_id,
-                event.event_type,
-                event.event_timestamp,
-                event.source_path,
-                event.destination_path,
-                event.aws_bucket,
-                event.aws_key,
-                event.file_size_bytes,
-                event.file_atime,
-                event.file_mtime,
-                event.pipeline_run_id,
-                event.function_name,
-                event.triggered_by,
-                event.success,
-                event.error_message,
-                event.checksum_value,
-                event.config_snapshot,
+        row = pa.table(
+            schema=LIFECYCLE_EVENTS_SCHEMA,
+            data=[
+                [event.event_id],
+                [event.element_handle],
+                [event.registration_id],
+                [event.event_type],
+                [event.event_timestamp],
+                [event.source_path],
+                [event.destination_path],
+                [event.aws_bucket],
+                [event.aws_key],
+                [event.file_size_bytes],
+                [event.file_atime],
+                [event.file_mtime],
+                [event.pipeline_run_id],
+                [event.function_name],
+                [event.triggered_by],
+                [event.success],
+                [event.error_message],
+                [event.checksum_value],
+                [event.config_snapshot],
             ],
         )
-        logger.info(
+        with self._session.transaction() as tx:
+            table = get_table(tx, TABLE_LIFECYCLE_EVENTS)
+            table.insert(row)
+
+        self._log(
+            "info",
             "Event emitted: %s %s handle=%s",
             event.event_type,
             event.event_id,

@@ -81,7 +81,7 @@ Before you start deploying ArchiveTrail, verify you have everything you need:
 - [ ] Network connectivity from K8s cluster to both VAST cluster and AWS
 
 **VAST Configuration:**
-- [ ] Direct S3 endpoint to your VAST cluster (typically something like `https://vip-pool.vast.local`)
+- [ ] Direct S3 endpoint to your VAST cluster (typically something like `https://your-vast-vip.example.com`)
 - [ ] Access credentials to VAST DB (S3 access key and secret key for your VAST cluster)
 - [ ] One or more views configured with **multiple protocols enabled** (must have both NFS or SMB **plus S3**—files need to be readable via S3)
 - [ ] At least 7 days of free disk space for VAST Catalog snapshots
@@ -187,7 +187,7 @@ You need a SQL client connected to your VAST DB. VAST DB is the built-in databas
 
 **Example using the Trino CLI** (optional—any of the above methods work):
 ```
-trino --server https://vms.vast.local --user admin --password
+trino --server https://your-vms.example.com --user admin --password
 ```
 
 > **What this means:** You're connecting to the VAST Metadata Service (VMS) which hosts VAST DB. VAST DB is a native SQL database built into the VAST Data Platform that stores metadata, tracking tables, and audit data. No separate Trino deployment is needed—VAST DB is included with your cluster.
@@ -272,12 +272,12 @@ Open `.env` in a text editor and fill in each field:
 
 | Variable | What It Is | Example |
 |----------|-----------|---------|
-| `VAST_S3_ENDPOINT` | The S3 address of your VAST cluster | `https://vip-pool.vast.local` |
+| `VAST_S3_ENDPOINT` | The S3 address of your VAST cluster | `https://your-vast-vip.example.com` |
 | `VAST_CLUSTER_NAME` | A label to identify this VAST cluster in AWS metadata | `vast-prod-cluster-01` |
 | `AWS_ACCESS_KEY_ID` | Your AWS account key (like a username) | `AKIA...` (20+ characters) |
 | `AWS_SECRET_ACCESS_KEY` | Your AWS account secret (like a password) | (long string) |
 | `AWS_DEFAULT_REGION` | The AWS region where your S3 bucket is | `us-east-1` or `us-west-2` |
-| `VASTDB_ENDPOINT` | The VAST metadata service address | `https://vms.vast.local` |
+| `VASTDB_ENDPOINT` | The VAST metadata service address | `https://your-vms.example.com` |
 | `VASTDB_ACCESS_KEY` | Your VAST database credentials | (provided by VAST admin) |
 | `VASTDB_SECRET_KEY` | Your VAST database credentials | (provided by VAST admin) |
 
@@ -300,12 +300,12 @@ If you don't have AWS credentials:
 Once filled in, the `.env` file should look like:
 
 ```
-VAST_S3_ENDPOINT=https://vip-pool.vast.local
+VAST_S3_ENDPOINT=https://your-vast-vip.example.com
 VAST_CLUSTER_NAME=vast-prod-cluster-01
-AWS_ACCESS_KEY_ID=AKIA1234567890ABCD
-AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG+j39sQSzVAQwrDAl
+AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
+AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
 AWS_DEFAULT_REGION=us-east-1
-VASTDB_ENDPOINT=https://vms.vast.local
+VASTDB_ENDPOINT=https://your-vms.example.com
 VASTDB_ACCESS_KEY=vast-db-user
 VASTDB_SECRET_KEY=vast-db-password
 ```
@@ -758,7 +758,7 @@ Output:
   "dry_run": "false",
   "batch_size": "500",
   "verify_checksum": "true",
-  "vast_s3_endpoint": "https://vip-pool.vast.local",
+  "vast_s3_endpoint": "https://your-vast-vip.example.com",
   "vast_cluster_name": "vast-cluster-01"
 }
 ```
@@ -811,7 +811,7 @@ This table explains every configuration setting you can adjust.
 | `dry_run` | If `true`, simulate the pipeline without making changes (discover + scan, but no copies or deletes). If `false`, actually copy and delete | `true` | `true` (testing), `false` (production) | Switch from `true` to `false` when confident |
 | `batch_size` | How many cold files to process per pipeline run (limits resource usage) | `500` | `100`, `500`, `1000`, `2000` | Increase if runs are fast and local hardware is not stressed; decrease if runs are slow or K8s nodes are overloaded |
 | `verify_checksum` | If `true`, read back copied files and verify MD5 matches original (catches corruption). If `false`, skip verification (faster but less safe) | `true` | `true` (safe), `false` (fast) | Keep as `true` unless network bandwidth is extremely limited |
-| `vast_s3_endpoint` | The S3 endpoint URL of your VAST cluster (used to read files for copying) | `https://vip-pool.vast.local` | `https://vip-pool.vast.local`, `https://s3.vast.example.com` | You have a different S3 address for VAST |
+| `vast_s3_endpoint` | The S3 endpoint URL of your VAST cluster (used to read files for copying) | `https://your-vast-vip.example.com` | `https://your-vast-vip.example.com`, `https://s3.vast.example.com` | You have a different S3 address for VAST |
 | `vast_cluster_name` | A label identifying this VAST cluster (embedded in AWS metadata for genealogy) | `vast-cluster-01` | `prod-cluster`, `backup-cluster`, `dr-cluster` | You're running multiple VAST clusters and want to identify which one offloaded a file |
 | `catalog_schema` | The schema path where VAST stores Catalog data (typically fixed) | `catalog/schema` | (should not change) | Only change if your VAST admin configured a custom path |
 | `catalog_table` | The table name where VAST stores Catalog data (typically fixed) | `catalog_table` | (should not change) | Only change if your VAST admin configured a custom name |
@@ -953,11 +953,11 @@ This table explains every configuration setting you can adjust.
    ```bash
    grep VASTDB_ENDPOINT .env
    ```
-   Should be something like `https://vms.vast.local`.
+   Should be something like `https://your-vms.example.com`.
 
 2. Test connectivity from your K8s cluster:
    ```bash
-   kubectl run -it debug --image=curl --rm -- curl -v https://vms.vast.local
+   kubectl run -it debug --image=curl --rm -- curl -v https://your-vms.example.com
    ```
    Should connect successfully.
 
@@ -965,7 +965,7 @@ This table explains every configuration setting you can adjust.
 
 4. Verify you can connect to VAST DB manually (using any Trino-compatible client, e.g., the `trino` CLI):
    ```bash
-   trino --server https://vms.vast.local --user <key> --password <secret>
+   trino --server https://your-vms.example.com --user <key> --password <secret>
    ```
 
 ### Files Are Not Showing in AWS

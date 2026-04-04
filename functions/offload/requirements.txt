@@ -1,0 +1,3 @@
+boto3>=1.34
+vastdb>=1.0
+pyarrow>=14.0

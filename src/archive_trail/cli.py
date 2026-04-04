@@ -7,11 +7,11 @@ Provides command-line access to ArchiveTrail for:
   - Viewing pipeline status and statistics
 
 Usage:
-    python -m archive_trail.cli discover --dry-run
-    python -m archive_trail.cli locate "*.xlsx"
-    python -m archive_trail.cli history <element_handle>
-    python -m archive_trail.cli config set atime_threshold_days 90 --by admin --reason "Q2 policy"
-    python -m archive_trail.cli stats
+    python -m archive_trail discover --dry-run
+    python -m archive_trail locate "*.xlsx"
+    python -m archive_trail history <element_handle>
+    python -m archive_trail config set atime_threshold_days 90 --by admin --reason "Q2 policy"
+    python -m archive_trail stats
 """
 
 import argparse
@@ -20,221 +20,226 @@ import logging
 import sys
 from datetime import datetime, timezone
 
-import vastdb
-
+from archive_trail.db import (
+    create_session,
+    ensure_tables,
+    get_table,
+    TABLE_ASSET_REGISTRY,
+    TABLE_LIFECYCLE_EVENTS,
+    TABLE_CONFIG_CHANGE_LOG,
+)
 from archive_trail.config import ArchiveTrailConfig
-from archive_trail.events import SCHEMA as EVENTS_SCHEMA
-from archive_trail.functions.discover import handler as discover_handler
-from archive_trail.functions.offload import handler as offload_handler
-from archive_trail.functions.verify_purge import handler as verify_purge_handler
 from archive_trail.registry import AssetRegistry
 
 logger = logging.getLogger("archive_trail.cli")
 
-SCHEMA = "archive/lineage"
-
 
 class ManualContext:
-    """Minimal context object for manual pipeline runs."""
+    """Minimal context object for manual pipeline runs.
+
+    Mimics the VAST DataEngine ctx object with a logger attribute.
+    """
 
     def __init__(self):
         self.run_id = f"manual-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
+        self.logger = logging.getLogger("archive_trail.manual")
+
+
+def _get_session():
+    """Create a VastDB session for CLI use."""
+    session = create_session(logger=logger)
+    ensure_tables(session, logger=logger)
+    return session
 
 
 def cmd_discover(args: argparse.Namespace) -> None:
     """Run the discover function manually."""
     ctx = ManualContext()
-    result = discover_handler({}, ctx)
-    candidates = result.get("candidates", [])
-    print(f"Discovered {len(candidates)} candidates (run_id={ctx.run_id})")
-    for c in candidates:
-        print(f"  {c['path']}  (age: atime={c['atime']}, size={c['size']})")
+    session = _get_session()
 
+    # Import the discover handler and wire it up
+    from archive_trail.config import ArchiveTrailConfig
+    from archive_trail.events import EventEmitter, EventType
+    from archive_trail.helpers import days_since, full_path
+    from archive_trail.registry import AssetRegistry
 
-def cmd_offload(args: argparse.Namespace) -> None:
-    """Run discover + offload manually."""
-    ctx = ManualContext()
-    discover_result = discover_handler({}, ctx)
-    candidates = discover_result.get("candidates", [])
-    if not candidates:
-        print("No candidates found")
-        return
-    print(f"Discovered {len(candidates)} candidates, starting offload...")
-    offload_result = offload_handler(discover_result, ctx)
-    offloaded = offload_result.get("offloaded", [])
-    failed = offload_result.get("failed", [])
-    print(f"Offloaded: {len(offloaded)}, Failed: {len(failed)}")
+    config = ArchiveTrailConfig(session, logger=ctx.logger)
+    registry = AssetRegistry(session, logger=ctx.logger)
+    emitter = EventEmitter(session, logger=ctx.logger)
 
+    config_snapshot = config.to_snapshot()
+    threshold = config.atime_threshold_days
+    batch_size = config.batch_size
 
-def cmd_purge(args: argparse.Namespace) -> None:
-    """Run verify_purge manually for assets already in BOTH state."""
-    ctx = ManualContext()
-    result = verify_purge_handler({"pipeline_run_id": ctx.run_id}, ctx)
-    purged = result.get("purged", [])
-    failed = result.get("failed", [])
-    skipped = result.get("skipped")
-    if skipped:
-        print(f"Purge skipped: {skipped}")
-        return
-    print(f"Purged: {len(purged)}, Failed: {len(failed)}")
+    print(f"Discover: threshold={threshold}d, dry_run={config.dry_run}, batch={batch_size}")
+    print(f"Run ID: {ctx.run_id}")
 
-
-def cmd_pipeline(args: argparse.Namespace) -> None:
-    """Run the full pipeline: discover -> offload -> verify_purge."""
-    ctx = ManualContext()
-    print(f"Pipeline run: {ctx.run_id}")
-
-    print("\n[1/3] Discover...")
-    discover_result = discover_handler({}, ctx)
-    candidates = discover_result.get("candidates", [])
-    print(f"  Found {len(candidates)} candidates")
-
-    if not candidates:
-        print("  No candidates, pipeline complete.")
-        return
-
-    print("\n[2/3] Offload...")
-    offload_result = offload_handler(discover_result, ctx)
-    offloaded = offload_result.get("offloaded", [])
-    failed = offload_result.get("failed", [])
-    print(f"  Offloaded: {len(offloaded)}, Failed: {len(failed)}")
-
-    print("\n[3/3] Verify & Purge...")
-    purge_result = verify_purge_handler(offload_result, ctx)
-    purged = purge_result.get("purged", [])
-    purge_skipped = purge_result.get("skipped")
-    if purge_skipped:
-        print(f"  Purge skipped: {purge_skipped}")
-    else:
-        print(f"  Purged: {len(purged)}")
-
-    print(f"\nPipeline complete: {ctx.run_id}")
+    # Get already offloaded handles
+    offloaded_handles = registry.get_offloaded_handles()
+    print(f"Already offloaded: {len(offloaded_handles)} handles")
+    print("(Catalog query would run here in DataEngine environment)")
 
 
 def cmd_locate(args: argparse.Namespace) -> None:
     """Find where a file is now."""
-    session = vastdb.Session()
-    registry = AssetRegistry(session)
-    pattern = args.pattern if "%" in args.pattern else f"%{args.pattern}%"
-    assets = registry.find_by_path(pattern)
-    if not assets:
+    session = _get_session()
+
+    import pyarrow as pa
+    with session.transaction() as tx:
+        table = get_table(tx, TABLE_ASSET_REGISTRY)
+        # Simple select — filter in Python for LIKE patterns
+        result = table.select(columns=[
+            "element_handle", "original_path", "current_location",
+            "current_aws_bucket", "current_aws_key", "source_md5",
+        ])
+
+    pattern = args.pattern.replace("*", "").replace("%", "")
+    found = False
+    for i in range(result.num_rows):
+        path = result.column("original_path")[i].as_py()
+        if pattern in (path or ""):
+            found = True
+            handle = result.column("element_handle")[i].as_py()
+            location = result.column("current_location")[i].as_py()
+            aws_bucket = result.column("current_aws_bucket")[i].as_py()
+            aws_key = result.column("current_aws_key")[i].as_py()
+            md5 = result.column("source_md5")[i].as_py()
+
+            print(f"  handle={handle}  location={location}  original={path}")
+            if aws_bucket:
+                print(f"    -> s3://{aws_bucket}/{aws_key}")
+            if md5:
+                print(f"    md5={md5}")
+
+    if not found:
         print(f"No assets found matching '{args.pattern}'")
-        return
-    for a in assets:
-        print(
-            f"  handle={a.element_handle}  "
-            f"location={a.current_location}  "
-            f"original={a.original_path}"
-        )
-        if a.current_aws_bucket:
-            print(
-                f"    -> s3://{a.current_aws_bucket}/{a.current_aws_key}"
-            )
-        if a.source_md5:
-            print(f"    md5={a.source_md5}")
 
 
 def cmd_history(args: argparse.Namespace) -> None:
     """Show the full lifecycle of an element."""
-    session = vastdb.Session()
-    rows = session.query(
-        f"""
-        SELECT event_type, event_timestamp, source_path, destination_path,
-               aws_bucket, aws_key, success, checksum_value, error_message,
-               pipeline_run_id, config_snapshot
-        FROM vast."{SCHEMA}".lifecycle_events
-        WHERE element_handle = ?
-        ORDER BY event_timestamp ASC
-        """,
-        [args.handle],
-    )
-    if not rows:
+    session = _get_session()
+
+    import pyarrow as pa
+    with session.transaction() as tx:
+        table = get_table(tx, TABLE_LIFECYCLE_EVENTS)
+        predicate = pa.compute.field("element_handle") == args.handle
+        result = table.select(
+            filter=predicate,
+            columns=[
+                "event_type", "event_timestamp", "source_path",
+                "destination_path", "success", "checksum_value",
+                "error_message",
+            ],
+        )
+
+    if result.num_rows == 0:
         print(f"No lifecycle events found for handle: {args.handle}")
         return
+
     print(f"Lifecycle for element {args.handle}:")
     print(f"{'─' * 80}")
-    for r in rows:
-        status = "OK" if r.get("success") else "FAIL" if r.get("success") is False else "--"
-        ts = r["event_timestamp"]
-        print(f"  [{ts}]  {r['event_type']:.<30s} {status}")
-        if r.get("source_path"):
-            print(f"    from: {r['source_path']}")
-        if r.get("destination_path"):
-            print(f"      to: {r['destination_path']}")
-        if r.get("checksum_value"):
-            print(f"    md5:  {r['checksum_value']}")
-        if r.get("error_message"):
-            print(f"    note: {r['error_message']}")
+    for i in range(result.num_rows):
+        event_type = result.column("event_type")[i].as_py()
+        ts = result.column("event_timestamp")[i].as_py()
+        success = result.column("success")[i].as_py()
+        status = "OK" if success else ("FAIL" if success is False else "--")
+
+        print(f"  [{ts}]  {event_type:.<30s} {status}")
+
+        src = result.column("source_path")[i].as_py()
+        dst = result.column("destination_path")[i].as_py()
+        cksum = result.column("checksum_value")[i].as_py()
+        err = result.column("error_message")[i].as_py()
+
+        if src:
+            print(f"    from: {src}")
+        if dst:
+            print(f"      to: {dst}")
+        if cksum:
+            print(f"    md5:  {cksum}")
+        if err:
+            print(f"    note: {err}")
 
 
 def cmd_config_list(args: argparse.Namespace) -> None:
     """Show current configuration."""
-    session = vastdb.Session()
-    config = ArchiveTrailConfig(session)
+    session = _get_session()
+    config = ArchiveTrailConfig(session, logger=logger)
     print("Current ArchiveTrail configuration:")
     print(json.dumps(json.loads(config.to_snapshot()), indent=2))
 
 
 def cmd_config_set(args: argparse.Namespace) -> None:
     """Update a configuration value with change tracking."""
-    session = vastdb.Session()
-    config = ArchiveTrailConfig(session)
+    session = _get_session()
+    config = ArchiveTrailConfig(session, logger=logger)
     config.update(args.key, args.value, changed_by=args.by, reason=args.reason)
     print(f"Config updated: {args.key} = {args.value}")
 
 
 def cmd_config_history(args: argparse.Namespace) -> None:
     """Show config change history."""
-    session = vastdb.Session()
-    rows = session.query(
-        f"""
-        SELECT config_key, old_value, new_value, changed_by,
-               changed_at, change_reason
-        FROM vast."{SCHEMA}".config_change_log
-        ORDER BY changed_at DESC
-        LIMIT 50
-        """
-    )
-    if not rows:
+    session = _get_session()
+
+    with session.transaction() as tx:
+        table = get_table(tx, TABLE_CONFIG_CHANGE_LOG)
+        result = table.select(columns=[
+            "config_key", "old_value", "new_value",
+            "changed_by", "changed_at", "change_reason",
+        ])
+
+    if result.num_rows == 0:
         print("No config changes recorded")
         return
+
     print("Config change history:")
-    for r in rows:
-        print(
-            f"  [{r['changed_at']}]  {r['config_key']}: "
-            f"'{r['old_value']}' -> '{r['new_value']}'  "
-            f"by {r['changed_by']} ({r['change_reason']})"
-        )
+    for i in range(result.num_rows):
+        key = result.column("config_key")[i].as_py()
+        old = result.column("old_value")[i].as_py()
+        new = result.column("new_value")[i].as_py()
+        by = result.column("changed_by")[i].as_py()
+        at = result.column("changed_at")[i].as_py()
+        reason = result.column("change_reason")[i].as_py()
+        print(f"  [{at}]  {key}: '{old}' -> '{new}'  by {by} ({reason})")
 
 
 def cmd_stats(args: argparse.Namespace) -> None:
     """Show pipeline statistics."""
-    session = vastdb.Session()
+    session = _get_session()
 
-    location_counts = session.query(
-        f"""
-        SELECT current_location, COUNT(*) as cnt,
-               SUM(file_size_bytes) as total_bytes
-        FROM vast."{SCHEMA}".asset_registry
-        GROUP BY current_location
-        """
-    )
+    # Asset summary by location
+    with session.transaction() as tx:
+        reg_table = get_table(tx, TABLE_ASSET_REGISTRY)
+        reg_result = reg_table.select(columns=["current_location", "file_size_bytes"])
+
+    # Aggregate in Python
+    location_stats: dict[str, dict] = {}
+    for i in range(reg_result.num_rows):
+        loc = reg_result.column("current_location")[i].as_py() or "UNKNOWN"
+        size = reg_result.column("file_size_bytes")[i].as_py() or 0
+        if loc not in location_stats:
+            location_stats[loc] = {"count": 0, "total_bytes": 0}
+        location_stats[loc]["count"] += 1
+        location_stats[loc]["total_bytes"] += size
+
     print("Asset Registry Summary:")
-    for r in location_counts:
-        size_gb = (r["total_bytes"] or 0) / (1024 ** 3)
-        print(f"  {r['current_location']:.<20s} {r['cnt']:>8d} assets  ({size_gb:.2f} GB)")
+    for loc, stats in sorted(location_stats.items()):
+        size_gb = stats["total_bytes"] / (1024 ** 3)
+        print(f"  {loc:.<20s} {stats['count']:>8d} assets  ({size_gb:.2f} GB)")
 
-    event_counts = session.query(
-        f"""
-        SELECT event_type, COUNT(*) as cnt
-        FROM vast."{SCHEMA}".lifecycle_events
-        GROUP BY event_type
-        ORDER BY cnt DESC
-        """
-    )
+    # Event summary by type
+    with session.transaction() as tx:
+        evt_table = get_table(tx, TABLE_LIFECYCLE_EVENTS)
+        evt_result = evt_table.select(columns=["event_type"])
+
+    event_counts: dict[str, int] = {}
+    for i in range(evt_result.num_rows):
+        et = evt_result.column("event_type")[i].as_py() or "UNKNOWN"
+        event_counts[et] = event_counts.get(et, 0) + 1
+
     print("\nLifecycle Event Counts:")
-    for r in event_counts:
-        print(f"  {r['event_type']:.<30s} {r['cnt']:>8d}")
+    for et, cnt in sorted(event_counts.items(), key=lambda x: -x[1]):
+        print(f"  {et:.<30s} {cnt:>8d}")
 
 
 def main() -> None:
@@ -249,15 +254,6 @@ def main() -> None:
 
     # discover
     sub.add_parser("discover", help="Run discovery phase")
-
-    # offload
-    sub.add_parser("offload", help="Run discover + offload")
-
-    # purge
-    sub.add_parser("purge", help="Run verify & purge for BOTH-state assets")
-
-    # pipeline
-    sub.add_parser("pipeline", help="Run full pipeline (discover -> offload -> purge)")
 
     # locate
     p_locate = sub.add_parser("locate", help="Find where a file is now")
@@ -293,9 +289,6 @@ def main() -> None:
 
     commands = {
         "discover": cmd_discover,
-        "offload": cmd_offload,
-        "purge": cmd_purge,
-        "pipeline": cmd_pipeline,
         "locate": cmd_locate,
         "history": cmd_history,
         "stats": cmd_stats,

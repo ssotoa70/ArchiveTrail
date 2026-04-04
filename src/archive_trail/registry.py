@@ -2,20 +2,22 @@
 
 Manages the master identity table (asset_registry) — one row per element,
 ever. Provides registration, state updates, and query helpers.
+
+Uses the vastdb PyArrow-based SDK for all database operations.
 """
 
-import logging
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
-import vastdb
+import pyarrow as pa
 
-logger = logging.getLogger("archive_trail.registry")
-
-SCHEMA = "archive/lineage"
-REGISTRY_TABLE = "asset_registry"
+from archive_trail.db import (
+    ASSET_REGISTRY_SCHEMA,
+    TABLE_ASSET_REGISTRY,
+    get_table,
+)
 
 
 @dataclass
@@ -65,55 +67,54 @@ class RegisteredAsset:
 class AssetRegistry:
     """Manages the asset_registry table in VAST DB."""
 
-    def __init__(self, session: vastdb.Session):
+    def __init__(self, session, logger=None):
         self._session = session
+        self._logger = logger
 
-    def register(
-        self,
-        entry: CatalogEntry,
-        bucket: str,
-        view: str,
-    ) -> str:
+    def _log(self, level, msg, *args):
+        if self._logger:
+            getattr(self._logger, level)(msg, *args)
+
+    def register(self, entry: CatalogEntry, bucket: str, view: str) -> str:
         """Register a new asset from a Catalog entry. Returns the registration_id."""
         reg_id = str(uuid.uuid4())
         full_path = f"{entry.parent_path}/{entry.name}"
         now = datetime.now(timezone.utc)
 
-        self._session.execute(
-            f"""
-            INSERT INTO vast."{SCHEMA}".{REGISTRY_TABLE}
-                (element_handle, registration_id,
-                 original_path, original_bucket, original_view,
-                 file_name, file_extension, file_size_bytes,
-                 file_ctime, file_mtime, file_atime,
-                 owner_uid, owner_login, nfs_mode_bits,
-                 current_location, current_aws_bucket,
-                 current_aws_key, current_aws_region,
-                 registered_at, last_state_change,
-                 source_md5, destination_md5)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    'LOCAL', NULL, NULL, NULL, ?, ?, NULL, NULL)
-            """,
-            [
-                entry.handle,
-                reg_id,
-                full_path,
-                bucket,
-                view,
-                entry.name,
-                entry.extension,
-                entry.size,
-                entry.ctime,
-                entry.mtime,
-                entry.atime,
-                entry.login_name,
-                entry.login_name,
-                entry.nfs_mode_bits,
-                now,
-                now,
+        row = pa.table(
+            schema=ASSET_REGISTRY_SCHEMA,
+            data=[
+                [entry.handle],         # element_handle
+                [reg_id],               # registration_id
+                [full_path],            # original_path
+                [bucket],               # original_bucket
+                [view],                 # original_view
+                [entry.name],           # file_name
+                [entry.extension],      # file_extension
+                [entry.size],           # file_size_bytes
+                [entry.ctime],          # file_ctime
+                [entry.mtime],          # file_mtime
+                [entry.atime],          # file_atime
+                [entry.login_name],     # owner_uid
+                [entry.login_name],     # owner_login
+                [entry.nfs_mode_bits],  # nfs_mode_bits
+                ["LOCAL"],              # current_location
+                [None],                 # current_aws_bucket
+                [None],                 # current_aws_key
+                [None],                 # current_aws_region
+                [now],                  # registered_at
+                [now],                  # last_state_change
+                [None],                 # source_md5
+                [None],                 # destination_md5
             ],
         )
-        logger.info(
+
+        with self._session.transaction() as tx:
+            table = get_table(tx, TABLE_ASSET_REGISTRY)
+            table.insert(row)
+
+        self._log(
+            "info",
             "Registered asset: handle=%s path=%s reg_id=%s",
             entry.handle, full_path, reg_id,
         )
@@ -130,114 +131,125 @@ class AssetRegistry:
         source_md5: Optional[str] = None,
         destination_md5: Optional[str] = None,
     ) -> None:
-        """Update the current state of an asset."""
+        """Update the current state of an asset.
+
+        Reads the existing row, applies changes, and writes back.
+        The vastdb SDK uses select + insert for updates (no SQL UPDATE).
+        We read the current row, delete it, and insert the updated version.
+        """
         now = datetime.now(timezone.utc)
 
-        set_clauses = [
-            "current_location = ?",
-            "last_state_change = ?",
-        ]
-        params: list = [new_location, now]
+        with self._session.transaction() as tx:
+            table = get_table(tx, TABLE_ASSET_REGISTRY)
 
-        if aws_bucket is not None:
-            set_clauses.append("current_aws_bucket = ?")
-            params.append(aws_bucket)
-        if aws_key is not None:
-            set_clauses.append("current_aws_key = ?")
-            params.append(aws_key)
-        if aws_region is not None:
-            set_clauses.append("current_aws_region = ?")
-            params.append(aws_region)
-        if source_md5 is not None:
-            set_clauses.append("source_md5 = ?")
-            params.append(source_md5)
-        if destination_md5 is not None:
-            set_clauses.append("destination_md5 = ?")
-            params.append(destination_md5)
+            # Read the current row
+            predicate = pa.compute.field("element_handle") == element_handle
+            result = table.select(filter=predicate)
 
-        params.append(element_handle)
+            if result.num_rows == 0:
+                self._log("warning", "Asset not found for update: %s", element_handle)
+                return
 
-        self._session.execute(
-            f"""
-            UPDATE vast."{SCHEMA}".{REGISTRY_TABLE}
-            SET {', '.join(set_clauses)}
-            WHERE element_handle = ?
-            """,
-            params,
-        )
-        logger.info(
-            "Registry updated: handle=%s -> %s", element_handle, new_location
-        )
+            # Build updated row from current values
+            row_dict = {}
+            for col_name in ASSET_REGISTRY_SCHEMA.names:
+                col = result.column(col_name)
+                row_dict[col_name] = [col[0].as_py()]
+
+            # Apply updates
+            row_dict["current_location"] = [new_location]
+            row_dict["last_state_change"] = [now]
+            if aws_bucket is not None:
+                row_dict["current_aws_bucket"] = [aws_bucket]
+            if aws_key is not None:
+                row_dict["current_aws_key"] = [aws_key]
+            if aws_region is not None:
+                row_dict["current_aws_region"] = [aws_region]
+            if source_md5 is not None:
+                row_dict["source_md5"] = [source_md5]
+            if destination_md5 is not None:
+                row_dict["destination_md5"] = [destination_md5]
+
+            updated_row = pa.table(schema=ASSET_REGISTRY_SCHEMA, data=row_dict)
+
+            # Delete old row and insert updated one
+            table.delete(predicate)
+            table.insert(updated_row)
+
+        self._log("info", "Registry updated: handle=%s -> %s", element_handle, new_location)
 
     def is_already_offloaded(self, element_handle: str) -> bool:
         """Check if an element has already been offloaded."""
-        rows = self._session.query(
-            f"""
-            SELECT element_handle FROM vast."{SCHEMA}".{REGISTRY_TABLE}
-            WHERE element_handle = ?
-              AND current_location IN ('AWS', 'BOTH', 'LOCAL_DELETED')
-            """,
-            [element_handle],
-        )
-        return len(rows) > 0
+        with self._session.transaction() as tx:
+            table = get_table(tx, TABLE_ASSET_REGISTRY)
+            predicate = (
+                (pa.compute.field("element_handle") == element_handle)
+                & (
+                    (pa.compute.field("current_location") == "AWS")
+                    | (pa.compute.field("current_location") == "BOTH")
+                    | (pa.compute.field("current_location") == "LOCAL_DELETED")
+                )
+            )
+            result = table.select(filter=predicate, columns=["element_handle"])
+            return result.num_rows > 0
+
+    def get_offloaded_handles(self) -> set[str]:
+        """Get all element handles that have been offloaded (for bulk filtering)."""
+        with self._session.transaction() as tx:
+            table = get_table(tx, TABLE_ASSET_REGISTRY)
+            predicate = (
+                (pa.compute.field("current_location") == "AWS")
+                | (pa.compute.field("current_location") == "BOTH")
+                | (pa.compute.field("current_location") == "LOCAL_DELETED")
+            )
+            result = table.select(filter=predicate, columns=["element_handle"])
+            return set(result.column("element_handle").to_pylist())
 
     def get_pending_purge(self) -> list[RegisteredAsset]:
         """Get all assets in BOTH state (local + AWS) ready for purge."""
-        rows = self._session.query(
-            f"""
-            SELECT * FROM vast."{SCHEMA}".{REGISTRY_TABLE}
-            WHERE current_location = 'BOTH'
-            """
-        )
-        return [self._row_to_asset(row) for row in rows]
-
-    def find_by_path(self, path_pattern: str) -> list[RegisteredAsset]:
-        """Find assets by original path pattern."""
-        rows = self._session.query(
-            f"""
-            SELECT * FROM vast."{SCHEMA}".{REGISTRY_TABLE}
-            WHERE original_path LIKE ?
-            """,
-            [path_pattern],
-        )
-        return [self._row_to_asset(row) for row in rows]
+        with self._session.transaction() as tx:
+            table = get_table(tx, TABLE_ASSET_REGISTRY)
+            predicate = pa.compute.field("current_location") == "BOTH"
+            result = table.select(filter=predicate)
+            return [self._row_to_asset(result, i) for i in range(result.num_rows)]
 
     def find_by_handle(self, element_handle: str) -> Optional[RegisteredAsset]:
         """Find a single asset by element handle."""
-        rows = self._session.query(
-            f"""
-            SELECT * FROM vast."{SCHEMA}".{REGISTRY_TABLE}
-            WHERE element_handle = ?
-            """,
-            [element_handle],
-        )
-        if not rows:
-            return None
-        return self._row_to_asset(rows[0])
+        with self._session.transaction() as tx:
+            table = get_table(tx, TABLE_ASSET_REGISTRY)
+            predicate = pa.compute.field("element_handle") == element_handle
+            result = table.select(filter=predicate)
+            if result.num_rows == 0:
+                return None
+            return self._row_to_asset(result, 0)
 
     @staticmethod
-    def _row_to_asset(row: dict) -> RegisteredAsset:
+    def _row_to_asset(table: pa.Table, index: int) -> RegisteredAsset:
+        """Convert a PyArrow table row to a RegisteredAsset."""
+        def _val(col_name):
+            return table.column(col_name)[index].as_py()
+
         return RegisteredAsset(
-            element_handle=row["element_handle"],
-            registration_id=row["registration_id"],
-            original_path=row["original_path"],
-            original_bucket=row["original_bucket"],
-            original_view=row["original_view"],
-            file_name=row["file_name"],
-            file_extension=row["file_extension"],
-            file_size_bytes=row["file_size_bytes"],
-            file_ctime=row["file_ctime"],
-            file_mtime=row["file_mtime"],
-            file_atime=row["file_atime"],
-            owner_uid=row["owner_uid"],
-            owner_login=row["owner_login"],
-            nfs_mode_bits=row["nfs_mode_bits"],
-            current_location=row["current_location"],
-            current_aws_bucket=row.get("current_aws_bucket"),
-            current_aws_key=row.get("current_aws_key"),
-            current_aws_region=row.get("current_aws_region"),
-            registered_at=row["registered_at"],
-            last_state_change=row["last_state_change"],
-            source_md5=row.get("source_md5"),
-            destination_md5=row.get("destination_md5"),
+            element_handle=_val("element_handle"),
+            registration_id=_val("registration_id"),
+            original_path=_val("original_path"),
+            original_bucket=_val("original_bucket"),
+            original_view=_val("original_view"),
+            file_name=_val("file_name"),
+            file_extension=_val("file_extension"),
+            file_size_bytes=_val("file_size_bytes"),
+            file_ctime=_val("file_ctime"),
+            file_mtime=_val("file_mtime"),
+            file_atime=_val("file_atime"),
+            owner_uid=_val("owner_uid"),
+            owner_login=_val("owner_login"),
+            nfs_mode_bits=_val("nfs_mode_bits"),
+            current_location=_val("current_location"),
+            current_aws_bucket=_val("current_aws_bucket"),
+            current_aws_key=_val("current_aws_key"),
+            current_aws_region=_val("current_aws_region"),
+            registered_at=_val("registered_at"),
+            last_state_change=_val("last_state_change"),
+            source_md5=_val("source_md5"),
+            destination_md5=_val("destination_md5"),
         )

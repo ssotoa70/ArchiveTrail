@@ -1,0 +1,27 @@
+# Dockerfile.fix — Post-build fix for VAST DataEngine CNB images
+#
+# The CNB buildpack launcher doesn't set LD_LIBRARY_PATH or PYTHONPATH
+# correctly. This Dockerfile patches the built image with direct Python
+# entrypoint, bypassing the broken launcher.
+#
+# Usage (per function):
+#   1. vastde functions build archive-trail-discover --target functions/discover
+#   2. docker build --platform linux/amd64 --no-cache \
+#        --build-arg BASE_IMAGE=archive-trail-discover:latest \
+#        -t $REGISTRY/archive-trail-discover:$VERSION \
+#        -f Dockerfile.fix .
+#   3. docker push $REGISTRY/archive-trail-discover:$VERSION
+
+ARG BASE_IMAGE=archive-trail:latest
+FROM ${BASE_IMAGE}
+
+ENV LD_LIBRARY_PATH="/layers/paketo-buildpacks_cpython/cpython/lib:/layers/apt-buildpack/apt/lib/x86_64-linux-gnu:/layers/apt-buildpack/apt/usr/lib/x86_64-linux-gnu"
+ENV PATH="/layers/paketo-buildpacks_cpython/cpython/bin:${PATH}"
+ENV PYTHONPATH="/workspace:/workspace/archive_trail_lib:/layers/paketo-buildpacks_cpython/cpython/lib/python3.12/site-packages:/layers/paketo-buildpacks_pip-install/packages/lib/python3.12/site-packages"
+
+# Ensure the shared library is accessible
+COPY src/archive_trail/ /workspace/archive_trail/
+
+WORKDIR /workspace
+ENTRYPOINT ["python3", "-m", "vast_runtime.main"]
+CMD ["--app-path", "/workspace", "--handler", "main.py"]
