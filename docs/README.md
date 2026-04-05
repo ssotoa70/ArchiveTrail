@@ -1,5 +1,14 @@
 # ArchiveTrail
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
+[![VAST Data Platform](https://img.shields.io/badge/VAST%20Data-5.4%2B-00B4D8.svg)](https://www.vastdata.com/)
+[![VAST DataEngine](https://img.shields.io/badge/DataEngine-Serverless-00B4D8.svg)](https://www.vastdata.com/)
+[![AWS S3](https://img.shields.io/badge/AWS-S3-FF9900.svg?logo=amazons3&logoColor=white)](https://aws.amazon.com/s3/)
+[![Code Style: Ruff](https://img.shields.io/badge/code%20style-ruff-D7FF64.svg)](https://docs.astral.sh/ruff/)
+[![PyArrow](https://img.shields.io/badge/PyArrow-14%2B-E34F26.svg)](https://arrow.apache.org/docs/python/)
+[![Wiki](https://img.shields.io/badge/docs-Wiki-brightgreen.svg)](https://github.com/ssotoa70/ArchiveTrail/wiki)
+
 **Automated cold data tiering from VAST Data Platform to AWS S3 with complete genealogy tracking and audit traceability.**
 
 ArchiveTrail is a VAST DataEngine-native solution that automatically identifies files that haven't been accessed in a configurable number of days, copies them to AWS S3, optionally deletes the local copies, and maintains a complete chain-of-custody record of every operation.
