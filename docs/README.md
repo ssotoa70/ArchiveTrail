@@ -265,7 +265,7 @@ See **[Operations Guide](wiki/Operations-Guide.md#Troubleshooting)** for:
 
 ## License
 
-[Your License Here]
+This project is licensed under the [MIT License](LICENSE).
 
 ## Contributing
 
